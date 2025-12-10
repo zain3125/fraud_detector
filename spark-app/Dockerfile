@@ -8,4 +8,4 @@ COPY requirements.txt .
 
 RUN pip install -r requirements.txt
 
-CMD ["spark-submit", "--master", "spark://spark-master:7077", "fraud_streaming.py"]
+CMD ["/opt/spark/bin/spark-submit", "--master", "spark://spark-master:7077", "fraud_streaming.py"]

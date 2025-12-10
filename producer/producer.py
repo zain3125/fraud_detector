@@ -1,12 +1,28 @@
 from kafka import KafkaProducer
+from kafka.errors import NoBrokersAvailable
 from faker import Faker
 import json
 import random
 import time
-producer = KafkaProducer(bootstrap_servers='kafka:9092',
-                         value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+
+def create_producer():
+    while True:
+        try:
+            print("Trying to connect to Kafka...")
+            producer = KafkaProducer(
+                bootstrap_servers='kafka:9092',
+                value_serializer=lambda v: json.dumps(v).encode('utf-8')
+            )
+            print("Connected to Kafka!")
+            return producer
+        except NoBrokersAvailable:
+            print("Kafka not available yet, retrying in 3 seconds...")
+            time.sleep(3)
+
+producer = create_producer()
 
 fake = Faker()
+print("Producer is running...")
 
 def genrate_transaction():
     return {

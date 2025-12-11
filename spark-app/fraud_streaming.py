@@ -90,16 +90,37 @@ def write_to_kafka(df):
 
 def main():
     spark = create_spark_session()
-    transactions = read_from_kafka(spark)
-    fraud_df = detect_fraud(transactions)
 
-    query = fraud_df.writeStream \
-        .format("console") \
-        .outputMode("update") \
-        .option("truncate", False) \
+    # Reduce log noise
+    spark.sparkContext.setLogLevel("ERROR")
+
+    transactions = read_from_kafka(spark)
+
+    # Convert timestamp early
+    transactions = transactions.withColumn("timestamp_ts", to_timestamp(col("data.timestamp")))
+
+    def show_batch(raw_df, batchId):
+        print(f"\n--- Raw Transactions Batch {batchId} ---")
+        raw_df.select(
+            "data.transaction_id", 
+            "data.user_id", 
+            "data.amount", 
+            "data.country", 
+            "timestamp_ts"
+        ).show(truncate=False)
+
+        # Compute fraud after aggregation
+        result_df = detect_fraud(raw_df)
+        print(f"\n--- Fraud Detection Batch {batchId} ---")
+        result_df.show(truncate=False)
+
+    query = transactions.writeStream \
+        .outputMode("append") \
+        .foreachBatch(show_batch) \
         .start()
 
     query.awaitTermination()
+
 
 if __name__ == "__main__":
     main()

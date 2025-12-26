@@ -42,7 +42,6 @@ def read_from_kafka(spark):
     parsed = df.select(from_json(col("value"), TRANSACTION_SCHEMA).alias("data"))
     return parsed
 
-
 def detect_fraud(transactions):
     # convert timestamp and add watermark so aggregations can be cleaned up
     transactions = transactions.withColumn("timestamp_ts", to_timestamp(col("data.timestamp")))
@@ -82,11 +81,23 @@ def detect_fraud(transactions):
         col("location_change_flag"),
         col("high_frequency_flag")
     )
-
+    result = result.filter(
+            (col("high_value_flag") == 1) | 
+            (col("location_change_flag") == 1) | 
+            (col("high_frequency_flag") == 1)
+        )
     return result
 
 def write_to_kafka(df):
-    pass
+    # Prepare the data to be sent to Kafka as JSON strings
+    df.select(
+        col("user_id").alias("key"),
+        to_json(struct([col(c) for c in df.columns])).alias("value")
+    ).write \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", KAFKA_BROKER) \
+        .option("topic", "fraud_alerts") \
+        .save()
 
 def main():
     spark = create_spark_session()
@@ -113,6 +124,10 @@ def main():
         result_df = detect_fraud(raw_df)
         print(f"\n--- Fraud Detection Batch {batchId} ---")
         result_df.show(truncate=False)
+        
+        # Write the results to Kafka topic
+        if not result_df.isEmpty():
+            write_to_kafka(result_df)
 
     query = transactions.writeStream \
         .outputMode("append") \
@@ -120,7 +135,6 @@ def main():
         .start()
 
     query.awaitTermination()
-
 
 if __name__ == "__main__":
     main()

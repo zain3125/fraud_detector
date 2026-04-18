@@ -1,6 +1,6 @@
 FROM apache/spark:3.5.6
 
-USER root
+USER spark
 WORKDIR /app
 
 COPY fraud_streaming.py .

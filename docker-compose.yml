@@ -111,8 +111,10 @@ services:
     build: ./spark-app
     container_name: spark-app
     depends_on:
-      - spark-master
-      - kafka
+      spark-master:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       - SPARK_MASTER=spark://spark-master:7077
       - KAFKA_BROKER=kafka:9092

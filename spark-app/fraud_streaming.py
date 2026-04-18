@@ -26,7 +26,7 @@ def create_spark_session():
     return SparkSession.builder \
         .appName("FraudDetection") \
         .master(SPARK_MASTER) \
-        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
+        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.6") \
         .getOrCreate()
 
 def read_from_kafka(spark):

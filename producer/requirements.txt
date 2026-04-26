@@ -1,2 +1,4 @@
 faker==25.0.1
 kafka-python==2.2.0
+prometheus_client
+python-json-logger

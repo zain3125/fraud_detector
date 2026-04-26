@@ -75,7 +75,7 @@ services:
       spark-master:
         condition: service_healthy
     ports:
-      - "8081:8081"    # Spark worker UI
+      - "8081:8081"
     environment:
       - SPARK_WORKER_CORES=2
       - SPARK_WORKER_MEMORY=2G
@@ -87,13 +87,18 @@ services:
 
   # Producer (Python)
   producer:
-    build: ./producer
+    build:
+      context: .
+      dockerfile: ./producer/Dockerfile
     container_name: producer
     depends_on:
       kafka:
         condition: service_healthy
     environment:
       - KAFKA_BROKER=kafka:9092
+      - PYTHONPATH=/app
+    ports:
+      - "8000:8000"
     healthcheck:
       test: ["CMD", "pgrep", "-f", "python"]
       interval: 30s
@@ -102,7 +107,9 @@ services:
 
   # Spark Fraud Detection App
   spark-app:
-    build: ./spark-app
+    build:
+      context: .
+      dockerfile: ./spark-app/Dockerfile
     container_name: spark-app
     depends_on:
       spark-master:
@@ -112,17 +119,25 @@ services:
     environment:
       - SPARK_MASTER=spark://spark-master:7077
       - KAFKA_BROKER=kafka:9092
+      - IVY_PACKAGE_DIR=/tmp/.ivy2
+      - HOME=/tmp
     command: >
       /opt/spark/bin/spark-submit
       --master spark://spark-master:7077
+      --conf "spark.jars.ivy=/tmp/.ivy2"
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.6
       /opt/spark-app/fraud_streaming.py
+    ports:
+      - "8002:8002"
     volumes:
       - ./spark-app:/opt/spark-app
+      - ./utils:/opt/spark-app/utils
 
   # Consumer (Python)
   consumer:
-    build: ./consumer
+    build:
+      context: .
+      dockerfile: ./consumer/Dockerfile
     container_name: consumer
     depends_on:
       kafka:
@@ -131,16 +146,45 @@ services:
         condition: service_healthy
     environment:
       - KAFKA_BROKER=kafka:9092
+      - PYTHONPATH=/app
       - POSTGRES_HOST=postgres
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      - "8001:8001"
     healthcheck:
       test: ["CMD", "pgrep", "-f", "python"]
       interval: 30s
       timeout: 5s
       retries: 3
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - spark-app
+      - producer
+      - consumer
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+
 # Volumes
 volumes:
   postgres_data:
+  grafana_data:

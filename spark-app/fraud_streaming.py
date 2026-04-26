@@ -1,7 +1,23 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, window, count, approx_count_distinct, when, to_json, to_timestamp, struct, max as spark_max
-from pyspark.sql.types import StringType, StructType, StructField, DoubleType, TimestampType
-import os
+from pyspark.sql.functions import (from_json, col, window, count, approx_count_distinct, 
+                                   when, to_json, to_timestamp, struct, max as spark_max, lit)
+from pyspark.sql.types import StringType, StructType, StructField, DoubleType
+from utils.logger import get_logger
+import time
+from prometheus_client import start_http_server, Counter
+
+start_http_server(8002)
+logger = get_logger("fraud_streaming")
+
+batches_processed = Counter(
+    "spark_batches_total",
+    "Total batches processed"
+)
+
+fraud_detected = Counter(
+    "fraud_detected_total",
+    "Total fraud records"
+)
 
 KAFKA_BROKER = "kafka:9092"
 SPARK_MASTER = "spark://spark-master:7077"
@@ -12,6 +28,7 @@ HIGH_FREQUENCY_THRESHOLD = 5
 FREQUENCY_TIME_WINDOW = 600
 
 TRANSACTION_SCHEMA = StructType([
+    StructField("event_id", StringType()),
     StructField("transaction_id", StringType()),
     StructField("user_id", StringType()),
     StructField("amount", DoubleType()),
@@ -43,11 +60,20 @@ def read_from_kafka(spark):
     return parsed
 
 def detect_fraud(transactions):
-    # convert timestamp and add watermark so aggregations can be cleaned up
-    transactions = transactions.withColumn("timestamp_ts", to_timestamp(col("data.timestamp")))
-    transactions = transactions.withWatermark("timestamp_ts", "15 minutes")
 
-    # aggregate per user over a frequency window (this window will be used for counts)
+    # 1. timestamp parsing
+    transactions = transactions.withColumn(
+        "timestamp_ts",
+        to_timestamp(col("data.timestamp"))
+    )
+
+    # 2. watermark for late events
+    transactions = transactions.withWatermark(
+        "timestamp_ts",
+        "15 minutes"
+    )
+
+    # 3. windowed aggregation per user
     agg = transactions.groupBy(
         col("data.user_id").alias("user_id"),
         window(col("timestamp_ts"), f"{FREQUENCY_TIME_WINDOW} seconds")
@@ -57,7 +83,7 @@ def detect_fraud(transactions):
         spark_max("data.amount").alias("max_amount")
     )
 
-    # derive flags
+    # 4. flags (same as before but kept for compatibility)
     agg = agg.withColumn(
         "high_value_flag",
         when(col("max_amount") > HIGH_AMOUNT_THRESHOLD, 1).otherwise(0)
@@ -69,7 +95,18 @@ def detect_fraud(transactions):
         when(col("txn_count") > HIGH_FREQUENCY_THRESHOLD, 1).otherwise(0)
     )
 
-    # select output columns
+    # 5. NEW: fraud score (improvement)
+    agg = agg.withColumn(
+        "fraud_score",
+        (col("high_value_flag") * 2 +
+         col("location_change_flag") * 2 +
+         col("high_frequency_flag") * 1)
+    ).withColumn(
+        "fraud_probability",
+        col("fraud_score") / lit(5.0)
+    )
+
+    # 6. output (UNCHANGED schema for Kafka/consumer compatibility)
     result = agg.select(
         col("user_id"),
         col("window.start").alias("window_start"),
@@ -79,13 +116,16 @@ def detect_fraud(transactions):
         col("max_amount"),
         col("high_value_flag"),
         col("location_change_flag"),
-        col("high_frequency_flag")
+        col("high_frequency_flag"),
+        col("fraud_score"),
+        col("fraud_probability")
     )
+
+    # 7. smarter filter (still compatible)
     result = result.filter(
-            (col("high_value_flag") == 1) | 
-            (col("location_change_flag") == 1) | 
-            (col("high_frequency_flag") == 1)
-        )
+        col("fraud_score") >= 2
+    )
+
     return result
 
 def write_to_kafka(df):
@@ -111,23 +151,46 @@ def main():
     transactions = transactions.withColumn("timestamp_ts", to_timestamp(col("data.timestamp")))
 
     def show_batch(raw_df, batchId):
-        print(f"\n--- Raw Transactions Batch {batchId} ---")
-        raw_df.select(
-            "data.transaction_id", 
-            "data.user_id", 
-            "data.amount", 
-            "data.country", 
-            "timestamp_ts"
-        ).show(truncate=False)
-
-        # Compute fraud after aggregation
-        result_df = detect_fraud(raw_df)
-        print(f"\n--- Fraud Detection Batch {batchId} ---")
-        result_df.show(truncate=False)
+        start_time = time.time()
         
-        # Write the results to Kafka topic
-        if not result_df.isEmpty():
-            write_to_kafka(result_df)
+        batches_processed.inc()
+
+        try:
+            has_data = raw_df.limit(1).count() > 0
+            if not has_data:
+                return
+
+            logger.info("batch_received", extra={"batch_id": batchId})
+
+            result_df = detect_fraud(raw_df)
+            
+            fraud_count = result_df.count()
+
+            if fraud_count > 0:
+                fraud_detected.inc(fraud_count)
+                write_to_kafka(result_df)
+
+            logger.info(
+                "fraud_detected",
+                extra={
+                    "batch_id": batchId,
+                    "fraud_records": fraud_count
+                }
+            )
+
+            logger.info(
+                "batch_completed",
+                extra={
+                    "batch_id": batchId,
+                    "duration_sec": round(time.time() - start_time, 3)
+                }
+            )
+
+        except Exception:
+            logger.exception(
+                "batch_processing_failed",
+                extra={"batch_id": batchId}
+            )
 
     query = transactions.writeStream \
         .outputMode("append") \
